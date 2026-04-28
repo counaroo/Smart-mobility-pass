@@ -1,0 +1,148 @@
+version: '3.8'
+
+services:
+  # --- INFRASTRUCTURE DE BASE ---
+  mysql-db:
+    image: mysql:8.0
+    container_name: mysql-mobility
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init-db:/docker-entrypoint-initdb.d
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  zipkin:
+    image: openzipkin/zipkin
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+
+  # --- SERVEURS DE CONTRÔLE ---
+  eureka-server:
+    build: ./eureka-server
+    container_name: eureka-server
+    ports:
+      - "8761:8761"
+    environment:
+      - EUREKA_CLIENT_REGISTER_WITH_EUREKA=false
+      - EUREKA_CLIENT_FETCH_REGISTRY=false
+
+  config-server:
+    build: ./config-server
+    container_name: config-server
+    ports:
+      - "8888:8888"
+    volumes:
+      - "C:/git-projet-repository/mobility-config-repo:/app/config-repo"
+    environment:
+      # Ligne magique : on dit à Spring de ne pas utiliser Git mais le système de fichiers
+      - SPRING_PROFILES_ACTIVE=native
+      - SPRING_CLOUD_CONFIG_SERVER_NATIVE_SEARCH_LOCATIONS=file:///app/config-repo
+      - SPRING_CLOUD_CONFIG_ENABLED=false
+    depends_on:
+      - eureka-server
+  # --- PORTE D'ENTREE ---
+  api-gateway:
+    build: ./api-gateway
+    container_name: api-gateway
+    ports:
+      - "8765:8765"
+    depends_on:
+      - eureka-server
+      - config-server
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_CONFIG_IMPORT=optional:configserver:http://config-server:8888
+      - EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=http://eureka-server:8761/eureka/
+
+  # --- MICROSERVICES METIERS ---
+
+  user-service:
+    build: ./user-service
+    container_name: user-service
+    ports:
+      - "8081:8081"
+    depends_on:
+      - mysql-db
+      - config-server
+    environment:
+      - SPRING_CONFIG_IMPORT=optional:configserver:http://config-server:8888
+      - USER-SERVICE_DATASOURCE-URL=jdbc:mysql://mysql-db:3306/users_db
+      - USER-SERVICE_URLREGISTRY=http://eureka-server:8761/eureka/
+      - USER-SERVICE_URIPORT=8081
+
+  trip-service:
+    build: ./trip-service
+    container_name: trip-service
+    ports:
+      - "8082:8082"
+    depends_on:
+      - mysql-db
+      - rabbitmq
+      - config-server
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_CONFIG_IMPORT=optional:configserver:http://config-server:8888
+      - TRIP-SERVICE_DATASOURCE-URL=jdbc:mysql://mysql-db:3306/trips_db
+      - TRIP-SERVICE_URLREGISTRY=http://eureka-server:8761/eureka/
+      - TRIP-SERVICE_URIPORT=8082
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+
+  billing-service:
+    build: ./billing-service
+    depends_on:
+      - mysql-db
+      - config-server
+    environment:
+      - SPRING_CONFIG_IMPORT=optional:configserver:http://config-server:8888
+      - BILLING-SERVICE_DATASOURCE-URL=jdbc:mysql://mysql-db:3306/billings_db
+      - BILLING-SERVICE_URLREGISTRY=http://eureka-server:8761/eureka/
+  smart-mobility-front:
+    build: ./smart-mobility-front
+    container_name: smart-mobility-front
+    ports:
+      - "8090:8090"
+    depends_on:
+      - api-gateway
+    environment:
+      - GATEWAY_URL=http://api-gateway:8765
+      
+  pricing-service:
+    build: ./pricing-service
+    depends_on:
+      - mysql-db
+      - config-server
+    environment:
+      - SPRING_CONFIG_IMPORT=optional:configserver:http://config-server:8888
+      - PRICING-SERVICE_DATASOURCE-URL=jdbc:mysql://mysql-db:3306/pricings_db
+      - PRICING-SERVICE_URLREGISTRY=http://eureka-server:8761/eureka/
+
+  notification-service:
+    build: ./notification-service
+    container_name: notification-service
+    ports:
+      - "8087:8087"
+    depends_on:
+      - mysql-db
+      - rabbitmq
+      - config-server
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_CONFIG_IMPORT=optional:configserver:http://config-server:8888
+      - EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - MANAGEMENT_TRACING_OTLP_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - SPRING_ZIPKIN_BASE_URL=http://zipkin:9411/
+
+volumes:
+  mysql_data:
